@@ -1,0 +1,43 @@
+---
+# cPanel "Git Version Control" deployment manifest — SOLID SCIENCE SCHOOLS instance.
+# $HOME resolves to the account home (e.g. /home1/rgabfmmy), so paths are portable.
+#
+# Same-origin layout (no separate api subdomain, no CORS):
+#   • App  → portal.solidscience.com.ng            Document Root: <HOME>/solidscience-portal
+#   • API  → portal.solidscience.com.ng/api/...     served via a symlink to the backend below.
+#
+# IMPORTANT: files are ONLY copied when you click "Deploy HEAD Commit" in
+#   cPanel → Git Version Control → Manage → Pull or Deploy.
+#
+# ONE-TIME SERVER SETUP:
+#   1. Subdomain portal.solidscience.com.ng → Document Root: <HOME>/solidscience-portal
+#   2. MultiPHP Manager → set portal.solidscience.com.ng to PHP 8.x (it runs the API via /api)
+#   3. After the first deploy, create <HOME>/solidscience-api/config/database.php and
+#      <HOME>/solidscience-api/config/ai.php with real values (git-ignored; the deploy
+#      ships only the .example files and never overwrites your real config).
+deployment:
+  tasks:
+    # ── Backend (PHP API) → kept OUTSIDE the web root at <HOME>/solidscience-api ──
+    - /bin/echo "== Deploying SOLID SCIENCE API to $HOME/solidscience-api (outside docroot) =="
+    - /bin/mkdir -p "$HOME/solidscience-api/app"
+    - /bin/mkdir -p "$HOME/solidscience-api/database"
+    - /bin/mkdir -p "$HOME/solidscience-api/public"
+    - /bin/mkdir -p "$HOME/solidscience-api/config"
+    - /bin/cp -R  backend/app/.      "$HOME/solidscience-api/app/"
+    - /bin/cp -R  backend/database/. "$HOME/solidscience-api/database/"
+    - /bin/cp -R  backend/public/.   "$HOME/solidscience-api/public/"
+    # -n = no-clobber: ships database.php.example / ai.php.example without
+    # overwriting your real config on redeploys.
+    - /bin/cp -Rn backend/config/.   "$HOME/solidscience-api/config/"
+
+    # ── Frontend (React build) → portal.solidscience.com.ng docroot ──
+    - /bin/echo "== Deploying frontend (SPA) to $HOME/solidscience-portal =="
+    - /bin/mkdir -p "$HOME/solidscience-portal"
+    - /bin/cp -R  learnersforge/dist/. "$HOME/solidscience-portal/"
+
+    # ── Expose the API on the SAME origin at /api → portal.solidscience.com.ng/api/v1/... ──
+    # ln -sfn is idempotent (safe to re-run every deploy). PHP resolves the real
+    # path, so app/ and config/ stay outside the web root.
+    - /bin/ln -sfn "$HOME/solidscience-api/public" "$HOME/solidscience-portal/api"
+    - /bin/echo "== Docroot now contains: =="
+    - /bin/ls -la "$HOME/solidscience-portal"

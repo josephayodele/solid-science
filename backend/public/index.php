@@ -1,0 +1,639 @@
+<?php
+// public/index.php  — LearnersForge API entry point
+// Compatible with PHP 7.4+
+
+declare(strict_types=1);
+error_reporting(E_ALL);
+ini_set('display_errors', '0');
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// Add the exact origin(s) the frontend is served from. The browser app calling
+// it must be listed here or the request is blocked (credentials are allowed, so
+// wildcard '*' cannot be used).
+// This instance serves the app and API from the SAME origin
+// (portal.solidscience.com.ng with the API under /api), so the browser makes
+// no cross-origin request and this allowlist is normally never consulted.
+// Kept only for local dev (Vite on :5173) hitting the live API, and as a safety net.
+$allowed_origins = [
+    'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:3000',
+    'https://solidscience.com.ng', 'https://www.solidscience.com.ng', 'https://portal.solidscience.com.ng',
+];
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+if (in_array($origin, $allowed_origins, true)) {
+    header("Access-Control-Allow-Origin: $origin");
+}
+header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
+header('Access-Control-Allow-Credentials: true');
+header('Content-Type: application/json; charset=UTF-8');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
+// ── Autoload ──────────────────────────────────────────────────────────────────
+$base = dirname(__DIR__);
+require $base . '/app/Models/DB.php';
+require $base . '/app/Controllers/AuthController.php';
+require $base . '/app/Controllers/AllControllers.php';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function respond($data, int $code = 200, string $message = 'success'): void {
+    http_response_code($code);
+    echo json_encode([
+        'status'  => $code < 400 ? 'success' : 'error',
+        'data'    => $data,
+        'message' => $message,
+    ]);
+    exit;
+}
+
+function body(): array {
+    $raw = file_get_contents('php://input');
+    return json_decode($raw ?: '{}', true) ?? [];
+}
+
+function authGuard(): array {
+    $header = $_SERVER['HTTP_AUTHORIZATION']
+       ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+       ?? '';
+
+    if (strpos($header, 'Bearer ') !== 0) {
+        respond(null, 401, 'Unauthenticated');
+    }
+    $token = substr($header, 7);
+    $userId = base64_decode($token);
+    $user = DB::one(
+        'SELECT id, role, school_id, first_name, last_name, email
+         FROM users WHERE id = ? AND is_active = 1',
+        [$userId]
+    );
+    if (!$user) {
+        respond(null, 401, 'Invalid token');
+    }
+    return $user;
+}
+
+// ── Parse URI ─────────────────────────────────────────────────────────────────
+$method = $_SERVER['REQUEST_METHOD'];
+$uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+
+// Strip XAMPP subdirectory prefix e.g. /learnersforge/public
+$uri = preg_replace('#^/learnersforge(?:/public)?#', '', $uri);
+$uri = '/' . trim($uri, '/');
+
+// Extract numeric ID from end of path e.g. /api/v1/students/5 -> id=5
+$id   = null;
+$path = $uri;
+if (preg_match('#^(.*)/(\d+)$#', $uri, $m)) {
+    $path = $m[1];
+    $id   = (int)$m[2];
+}
+
+// ── Route ─────────────────────────────────────────────────────────────────────
+try {
+
+    // ── Auth ──────────────────────────────────────────────────────────────────
+    if ($path === '/api/v1/auth/login' && $method === 'POST') {
+        AuthController::login();
+
+    } elseif ($path === '/api/v1/auth/me' && $method === 'GET') {
+        AuthController::me(authGuard());
+
+    } elseif ($path === '/api/v1/auth/logout' && $method === 'POST') {
+        respond(null, 200, 'Logged out');
+
+    // ── Dashboard ─────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/dashboard' && $method === 'GET') {
+        DashboardController::index(authGuard());
+
+    // ── Students ──────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/students' && !$id && $method === 'GET') {
+        StudentController::index(authGuard());
+
+    } elseif ($path === '/api/v1/students/import' && $method === 'POST') {
+        StudentController::import(authGuard());
+
+    } elseif ($path === '/api/v1/students/bulk-delete' && $method === 'POST') {
+        StudentController::bulkDestroy(authGuard());
+
+    } elseif ($path === '/api/v1/students' && $method === 'POST') {
+        StudentController::store(authGuard());
+
+    } elseif ($path === '/api/v1/students' && $id && $method === 'GET') {
+        StudentController::show(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/students' && $id && $method === 'PUT') {
+        StudentController::update(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/students' && $id && $method === 'DELETE') {
+        StudentController::destroy(authGuard(), $id);
+
+    // ── Staff ─────────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/staff' && !$id && $method === 'GET') {
+        StaffController::index(authGuard());
+
+    } elseif ($path === '/api/v1/me/assignments' && $method === 'GET') {
+        StaffController::myAssignments(authGuard());
+
+    } elseif ($path === '/api/v1/staff/import' && $method === 'POST') {
+        StaffController::import(authGuard());
+
+    } elseif ($path === '/api/v1/staff' && $method === 'POST') {
+        StaffController::store(authGuard());
+
+    } elseif (preg_match('#^/api/v1/staff/(\d+)/assignments$#', $path, $mstaff) && $method === 'GET') {
+        StaffController::assignments(authGuard(), (int)$mstaff[1]);
+
+    } elseif (preg_match('#^/api/v1/staff/(\d+)/assignments$#', $path, $mstaff) && $method === 'POST') {
+        StaffController::saveAssignments(authGuard(), (int)$mstaff[1]);
+
+    } elseif ($path === '/api/v1/staff' && $id && $method === 'GET') {
+        StaffController::show(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/staff' && $id && ($method === 'PUT' || $method === 'PATCH')) {
+        StaffController::update(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/staff' && $id && $method === 'DELETE') {
+        StaffController::destroy(authGuard(), $id);
+
+    // ── Attendance ────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/attendance' && $method === 'GET') {
+        AttendanceController::index(authGuard());
+
+    } elseif ($path === '/api/v1/attendance/bulk' && $method === 'POST') {
+        AttendanceController::bulk(authGuard());
+
+    } elseif ($path === '/api/v1/attendance/summary' && $method === 'GET') {
+        AttendanceController::summary(authGuard());
+
+    } elseif ($path === '/api/v1/attendance/term-summary' && $method === 'GET') {
+        AttendanceController::summaryList(authGuard());
+
+    } elseif ($path === '/api/v1/attendance/term-summary' && $method === 'POST') {
+        AttendanceController::saveSummary(authGuard());
+
+    // ── Grades ────────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/ca-types' && $method === 'GET') {
+        GradeController::caTypes(authGuard());
+
+    } elseif ($path === '/api/v1/ca-types/all' && $method === 'GET') {
+        GradeController::caTypesAll(authGuard());
+
+    } elseif ($path === '/api/v1/ca-types/save' && $method === 'POST') {
+        GradeController::saveCaTypes(authGuard());
+
+    // ── Report-card remark ranges ───────────────────────────────────────────
+    } elseif ($path === '/api/v1/remark-ranges' && $method === 'GET') {
+        RemarkController::index(authGuard());
+
+    } elseif ($path === '/api/v1/remark-ranges' && $method === 'POST') {
+        RemarkController::store(authGuard());
+
+    } elseif ($path === '/api/v1/remark-ranges' && $id && $method === 'PUT') {
+        RemarkController::update(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/remark-ranges' && $id && $method === 'DELETE') {
+        RemarkController::destroy(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/grades' && $method === 'GET') {
+        GradeController::index(authGuard());
+
+    } elseif ($path === '/api/v1/grades/bulk' && $method === 'POST') {
+        GradeController::bulk(authGuard());
+
+    } elseif ($path === '/api/v1/grades/reset' && $method === 'DELETE') {
+        GradeController::resetScores(authGuard());
+
+    } elseif ($path === '/api/v1/grades/report-card' && $method === 'GET') {
+        GradeController::reportCard(authGuard());
+
+    } elseif ($path === '/api/v1/grades/report-card/email' && $method === 'POST') {
+        GradeController::emailReportCards(authGuard());
+
+    } elseif ($path === '/api/v1/grades/broadsheet' && $method === 'GET') {
+        GradeController::broadsheet(authGuard());
+
+    } elseif ($path === '/api/v1/grades/cumulative' && $method === 'GET') {
+        GradeController::cumulative(authGuard());
+
+    } elseif ($path === '/api/v1/behaviour' && $method === 'GET') {
+        GradeController::behaviour(authGuard());
+
+    } elseif ($path === '/api/v1/behaviour/bulk' && $method === 'POST') {
+        GradeController::saveBehaviour(authGuard());
+
+    } elseif ($path === '/api/v1/comments' && $method === 'GET') {
+        GradeController::comments(authGuard());
+
+    } elseif ($path === '/api/v1/comments/bulk' && $method === 'POST') {
+        GradeController::saveComments(authGuard());
+
+    // ── Fees & Finance ────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/fees/invoices' && $method === 'GET') {
+        FeeController::invoices(authGuard());
+
+    } elseif ($path === '/api/v1/fees/payments' && $method === 'POST') {
+        FeeController::recordPayment(authGuard());
+
+    } elseif ($path === '/api/v1/fees/expenses' && $method === 'GET') {
+        FeeController::expenses(authGuard());
+
+    } elseif ($path === '/api/v1/fees/expenses' && $method === 'POST') {
+        FeeController::addExpense(authGuard());
+
+    } elseif ($path === '/api/v1/fees/payroll' && $method === 'GET') {
+        FeeController::payroll(authGuard());
+
+    } elseif ($path === '/api/v1/fees/summary' && $method === 'GET') {
+        FeeController::summary(authGuard());
+
+    // ── Timetable ─────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/timetable' && $method === 'GET') {
+        TimetableController::index(authGuard());
+
+    } elseif ($path === '/api/v1/timetable' && $method === 'POST') {
+        TimetableController::save(authGuard());
+
+    // ── Exams / CBT ───────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/exams' && !$id && $method === 'GET') {
+        ExamController::index(authGuard());
+
+    } elseif ($path === '/api/v1/exams' && $method === 'POST') {
+        ExamController::store(authGuard());
+
+    } elseif ($path === '/api/v1/exams' && $id && $method === 'GET') {
+        ExamController::show(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/exams' && $id && $method === 'PUT') {
+        ExamController::update(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/exams' && $id && $method === 'DELETE') {
+        ExamController::destroy(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/exams/submit' && $method === 'POST') {
+        ExamController::submit(authGuard());
+
+    } elseif (preg_match('#^/api/v1/exams/(\d+)/questions$#', $path, $mex) && $method === 'POST') {
+        ExamController::addQuestions(authGuard(), (int)$mex[1]);
+
+    // Teacher grading / results (submissions keyed by their own id at top level).
+    } elseif (preg_match('#^/api/v1/exams/(\d+)/submissions$#', $path, $msub) && $method === 'GET') {
+        ExamController::submissions(authGuard(), (int)$msub[1]);
+
+    } elseif ($path === '/api/v1/submissions' && $id && $method === 'GET') {
+        ExamController::submissionDetail(authGuard(), $id);
+
+    } elseif (preg_match('#^/api/v1/submissions/(\d+)/grade$#', $path, $mg) && $method === 'POST') {
+        ExamController::gradeSubmission(authGuard(), (int)$mg[1]);
+
+    // ── Student portal (exam taking) ────────────────────────────────────────────
+    // Note: the router strips a trailing numeric id, so /my/exams/5 arrives as
+    // path=/api/v1/my/exams with $id=5.
+    } elseif ($path === '/api/v1/my/exams' && !$id && $method === 'GET') {
+        StudentPortalController::myExams(authGuard());
+
+    } elseif ($path === '/api/v1/my/exams' && $id && $method === 'GET') {
+        StudentPortalController::takeExam(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/my/results' && !$id && $method === 'GET') {
+        StudentPortalController::myResults(authGuard());
+
+    } elseif ($path === '/api/v1/my/results' && $id && $method === 'GET') {
+        StudentPortalController::myResultDetail(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/my/exam-submit' && $method === 'POST') {
+        StudentPortalController::submitExam(authGuard());
+
+    } elseif ($path === '/api/v1/my/assignments' && $method === 'GET') {
+        StudentPortalController::myAssignments(authGuard());
+
+    } elseif ($path === '/api/v1/my/assignment-submit' && $method === 'POST') {
+        StudentPortalController::submitAssignment(authGuard());
+
+    // ── Inventory ─────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/inventory' && $method === 'GET') {
+        InventoryController::index(authGuard());
+
+    } elseif ($path === '/api/v1/inventory' && $method === 'POST') {
+        InventoryController::store(authGuard());
+
+    } elseif ($path === '/api/v1/inventory/issue' && $method === 'POST') {
+        InventoryController::issue(authGuard());
+
+    } elseif ($path === '/api/v1/inventory/restock' && $method === 'POST') {
+        InventoryController::restock(authGuard());
+
+    } elseif ($path === '/api/v1/inventory/transactions' && $method === 'GET') {
+        InventoryController::transactions(authGuard());
+
+    // ── Hostel ────────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/hostels' && $method === 'GET') {
+        HostelController::index(authGuard());
+
+    } elseif ($path === '/api/v1/hostel/rooms' && $method === 'GET') {
+        HostelController::rooms(authGuard());
+
+    } elseif ($path === '/api/v1/hostel/allocate' && $method === 'POST') {
+        HostelController::allocate(authGuard());
+
+    } elseif ($path === '/api/v1/hostel/visitors' && $method === 'GET') {
+        HostelController::visitors(authGuard());
+
+    } elseif ($path === '/api/v1/hostel/visitors' && $method === 'POST') {
+        HostelController::logVisitor(authGuard());
+
+    // ── Transport ───────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/transport/routes' && !$id && $method === 'GET') {
+        TransportController::routes(authGuard());
+
+    } elseif ($path === '/api/v1/transport/routes' && !$id && $method === 'POST') {
+        TransportController::saveRoute(authGuard());
+
+    } elseif ($path === '/api/v1/transport/routes' && $id && $method === 'PUT') {
+        TransportController::saveRoute(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/transport/routes' && $id && $method === 'DELETE') {
+        TransportController::deleteRoute(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/transport/assignments' && !$id && $method === 'GET') {
+        TransportController::assignments(authGuard());
+
+    } elseif ($path === '/api/v1/transport/assignments' && $id && $method === 'DELETE') {
+        TransportController::unassign(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/transport/assign' && $method === 'POST') {
+        TransportController::assign(authGuard());
+
+    } elseif ($path === '/api/v1/transport/fee' && $method === 'POST') {
+        TransportController::recordFee(authGuard());
+
+    // ── HR (staff attendance, leave, payroll) ───────────────────────────────────
+    } elseif ($path === '/api/v1/hr/staff-attendance' && $method === 'GET') {
+        HRController::staffAttendance(authGuard());
+
+    } elseif ($path === '/api/v1/hr/staff-attendance' && $method === 'POST') {
+        HRController::saveStaffAttendance(authGuard());
+
+    } elseif ($path === '/api/v1/hr/leave' && !$id && $method === 'GET') {
+        HRController::leave(authGuard());
+
+    } elseif ($path === '/api/v1/hr/leave' && !$id && $method === 'POST') {
+        HRController::requestLeave(authGuard());
+
+    } elseif ($path === '/api/v1/hr/leave' && $id && $method === 'PUT') {
+        HRController::decideLeave(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/hr/payroll' && $method === 'GET') {
+        HRController::payroll(authGuard());
+
+    } elseif ($path === '/api/v1/hr/payroll' && $method === 'POST') {
+        HRController::savePayroll(authGuard());
+
+    } elseif ($path === '/api/v1/hr/payroll/pay' && $method === 'POST') {
+        HRController::payPayroll(authGuard());
+
+    // ── Analytics (read-only dashboards) ────────────────────────────────────────
+    } elseif ($path === '/api/v1/analytics/performance' && $method === 'GET') {
+        AnalyticsController::performance(authGuard());
+
+    } elseif ($path === '/api/v1/analytics/attendance' && $method === 'GET') {
+        AnalyticsController::attendance(authGuard());
+
+    } elseif ($path === '/api/v1/analytics/finance' && $method === 'GET') {
+        AnalyticsController::finance(authGuard());
+
+    } elseif ($path === '/api/v1/analytics/admissions' && $method === 'GET') {
+        AnalyticsController::admissions(authGuard());
+
+    // ── Online assignments (teacher/admin) ──────────────────────────────────────
+    } elseif (preg_match('#^/api/v1/assignments/(\d+)/submissions$#', $path, $masub) && $method === 'GET') {
+        AssignmentController::submissions(authGuard(), (int)$masub[1]);
+
+    } elseif (preg_match('#^/api/v1/assignment-submissions/(\d+)/grade$#', $path, $mag) && $method === 'POST') {
+        AssignmentController::grade(authGuard(), (int)$mag[1]);
+
+    } elseif ($path === '/api/v1/assignments' && !$id && $method === 'GET') {
+        AssignmentController::index(authGuard());
+
+    } elseif ($path === '/api/v1/assignments' && !$id && $method === 'POST') {
+        AssignmentController::store(authGuard());
+
+    } elseif ($path === '/api/v1/assignments' && $id && $method === 'PUT') {
+        AssignmentController::update(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/assignments' && $id && $method === 'DELETE') {
+        AssignmentController::destroy(authGuard(), $id);
+
+    // ── Communications (email + WhatsApp broadcasts, reminders, parent preview) ──
+    } elseif ($path === '/api/v1/communications/audiences' && $method === 'GET') {
+        CommunicationController::audiences(authGuard());
+
+    } elseif (preg_match('#^/api/v1/communications/events/(\d+)/remind$#', $path, $mcr) && $method === 'POST') {
+        CommunicationController::sendReminder(authGuard(), (int)$mcr[1]);
+
+    } elseif ($path === '/api/v1/communications/parent-preview' && $id && $method === 'GET') {
+        CommunicationController::parentPreview(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/communications/events' && !$id && $method === 'GET') {
+        CommunicationController::events(authGuard());
+
+    } elseif ($path === '/api/v1/communications/events' && !$id && $method === 'POST') {
+        CommunicationController::saveEvent(authGuard());
+
+    } elseif ($path === '/api/v1/communications/events' && $id && $method === 'PUT') {
+        CommunicationController::saveEvent(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/communications/events' && $id && $method === 'DELETE') {
+        CommunicationController::deleteEvent(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/communications' && !$id && $method === 'GET') {
+        CommunicationController::history(authGuard());
+
+    } elseif ($path === '/api/v1/communications' && !$id && $method === 'POST') {
+        CommunicationController::send(authGuard());
+
+    // ── Library ───────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/library/books' && $method === 'GET') {
+        LibraryController::books(authGuard());
+
+    } elseif ($path === '/api/v1/library/loans' && $method === 'GET') {
+        LibraryController::loans(authGuard());
+
+    } elseif ($path === '/api/v1/library/issue' && $method === 'POST') {
+        LibraryController::issue(authGuard());
+
+    } elseif ($path === '/api/v1/library/return' && $method === 'POST') {
+        LibraryController::returnBook(authGuard());
+
+    // ── Messaging ─────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/messages' && $method === 'GET') {
+        MessagingController::index(authGuard());
+
+    } elseif ($path === '/api/v1/messages' && $method === 'POST') {
+        MessagingController::send(authGuard());
+
+    } elseif ($path === '/api/v1/notifications' && $method === 'GET') {
+        MessagingController::notifications(authGuard());
+
+    // ── Admissions ────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/admissions' && $method === 'GET') {
+        AdmissionController::index(authGuard());
+
+    } elseif ($path === '/api/v1/admissions' && $method === 'POST') {
+        AdmissionController::store(authGuard());
+
+    } elseif ($path === '/api/v1/admissions' && $id && $method === 'PUT') {
+        AdmissionController::update(authGuard(), $id);
+
+    // ── Public branding (no auth) — school name + current session for the login screen ──
+    } elseif ($path === '/api/v1/public/school-info' && $method === 'GET') {
+        $school = DB::one('SELECT name, motto, logo_url FROM schools ORDER BY id LIMIT 1');
+        $year   = DB::one('SELECT name FROM academic_years WHERE is_current = 1 ORDER BY id DESC LIMIT 1')
+               ?? DB::one('SELECT name FROM academic_years ORDER BY id DESC LIMIT 1');
+        respond([
+            'name'     => $school['name']     ?? null,
+            'motto'    => $school['motto']    ?? null,
+            'logo_url' => $school['logo_url'] ?? null,
+            'session'  => $year['name']       ?? null,
+        ]);
+
+    // ── Settings (school profile / branding) ───────────────────────────────────
+    } elseif ($path === '/api/v1/settings/school' && $method === 'GET') {
+        SettingsController::getSchool(authGuard());
+
+    } elseif ($path === '/api/v1/settings/school' && ($method === 'PUT' || $method === 'POST')) {
+        SettingsController::updateSchool(authGuard());
+
+    // ── AI (z.ai proxy) ─────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/ai/chat' && $method === 'POST') {
+        AIController::chat(authGuard());
+
+    // ── Utilities ─────────────────────────────────────────────────────────────
+    } elseif ($path === '/api/v1/classes' && $method === 'GET') {
+        respond(DB::query(
+            'SELECT * FROM classes WHERE school_id = ? AND deleted_at IS NULL ORDER BY name',
+            [1]
+        ));
+
+    } elseif ($path === '/api/v1/classes' && $method === 'POST') {
+        $u = authGuard();
+        $b = body();
+        $name = trim($b['name'] ?? '');
+        if ($name === '') respond(null, 422, 'Class name is required.');
+        $ay = DB::one('SELECT id FROM academic_years WHERE school_id=? ORDER BY is_current DESC, id DESC LIMIT 1', [(int)$u['school_id']]);
+        if (!$ay) respond(null, 422, 'No academic year is set up for this school.');
+        $dup = DB::one('SELECT id FROM classes WHERE school_id=? AND name=? AND deleted_at IS NULL', [(int)$u['school_id'], $name]);
+        if ($dup) respond(null, 409, 'A class named "' . $name . '" already exists.');
+        // Clamp to column widths so long names (e.g. "BASIC 1") never overflow the
+        // small form/level/arm/name columns and 500 under MySQL strict mode.
+        $clamp = fn($v, $n) => ($v === null || $v === '') ? null : mb_substr((string)$v, 0, $n);
+        $newId = DB::exec(
+            'INSERT INTO classes (school_id, academic_year_id, name, level, form, arm, capacity) VALUES (?,?,?,?,?,?,?)',
+            [(int)$u['school_id'], (int)$ay['id'], $clamp($name, 20), $clamp($b['level'] ?? null, 10), $clamp($b['form'] ?? null, 5), $clamp($b['arm'] ?? null, 5), (int)($b['capacity'] ?? 40)]
+        );
+        respond(['id' => $newId, 'name' => $clamp($name, 20)], 201, 'Class created');
+
+    } elseif ($path === '/api/v1/subjects' && !$id && $method === 'GET') {
+        respond(DB::query(
+            'SELECT * FROM subjects WHERE school_id = ? AND deleted_at IS NULL ORDER BY name',
+            [1]
+        ));
+
+    } elseif ($path === '/api/v1/subjects' && $method === 'POST') {
+        $u = authGuard();
+        $b = body();
+        $name = trim($b['name'] ?? '');
+        if ($name === '') respond(null, 422, 'Subject name is required.');
+        $sid = (int)$u['school_id'];
+        if (DB::one('SELECT id FROM subjects WHERE school_id=? AND name=? AND deleted_at IS NULL', [$sid, $name]))
+            respond(null, 422, 'A subject with that name already exists.');
+        $newId = DB::exec('INSERT INTO subjects (school_id,name,code,department) VALUES (?,?,?,?)',
+            [$sid, $name, (trim($b['code'] ?? '') ?: null), (trim($b['department'] ?? '') ?: null)]);
+        respond(['id' => $newId, 'name' => $name], 201, 'Subject created');
+
+    } elseif ($path === '/api/v1/subjects' && $id && $method === 'DELETE') {
+        $u = authGuard();
+        DB::run('UPDATE subjects SET deleted_at=NOW() WHERE id=? AND school_id=?', [$id, (int)$u['school_id']]);
+        respond(['deleted' => true]);
+
+    // ── Class ⇄ subject mapping (curriculum per class) ────────────────────────
+    } elseif ($path === '/api/v1/class-subjects' && $method === 'GET') {
+        authGuard();
+        $classId = (int)($_GET['class_id'] ?? 0);
+        if (!$classId) respond(null, 422, 'class_id required');
+        respond(DB::query(
+            'SELECT sub.id, sub.name, sub.code,
+                    EXISTS(SELECT 1 FROM grades g JOIN students s ON s.id = g.student_id
+                           WHERE s.class_id = cs.class_id AND g.subject_id = sub.id) AS has_grades
+             FROM class_subjects cs JOIN subjects sub ON sub.id = cs.subject_id
+             WHERE cs.class_id = ? AND sub.deleted_at IS NULL
+             ORDER BY sub.name',
+            [$classId]));
+
+    } elseif ($path === '/api/v1/class-subjects' && $method === 'POST') {
+        $u = authGuard();
+        if (!in_array($u['role'] ?? '', ['super_admin', 'school_admin'], true))
+            respond(null, 403, 'Only an administrator can change class subjects.');
+        $b = body();
+        $classId   = (int)($b['class_id'] ?? 0);
+        $subjectId = (int)($b['subject_id'] ?? 0);
+        if (!$classId || !$subjectId) respond(null, 422, 'class_id and subject_id required');
+        $sid = (int)$u['school_id'];
+        if (!DB::one('SELECT id FROM classes  WHERE id=? AND school_id=?', [$classId, $sid])
+         || !DB::one('SELECT id FROM subjects WHERE id=? AND school_id=? AND deleted_at IS NULL', [$subjectId, $sid]))
+            respond(null, 404, 'Class or subject not found.');
+        if (!DB::one('SELECT id FROM class_subjects WHERE class_id=? AND subject_id=?', [$classId, $subjectId]))
+            DB::run('INSERT INTO class_subjects (class_id, subject_id) VALUES (?,?)', [$classId, $subjectId]);
+        respond(['mapped' => true]);
+
+    } elseif ($path === '/api/v1/class-subjects' && $method === 'DELETE') {
+        $u = authGuard();
+        if (!in_array($u['role'] ?? '', ['super_admin', 'school_admin'], true))
+            respond(null, 403, 'Only an administrator can change class subjects.');
+        $classId   = (int)($_GET['class_id'] ?? 0);
+        $subjectId = (int)($_GET['subject_id'] ?? 0);
+        if (!$classId || !$subjectId) respond(null, 422, 'class_id and subject_id required');
+        if (!DB::one('SELECT id FROM classes WHERE id=? AND school_id=?', [$classId, (int)$u['school_id']]))
+            respond(null, 404, 'Class not found.');
+        // Unmapping removes the subject from the class curriculum AND clears any
+        // scores it has in that class (all terms), so it disappears from the
+        // class's report cards and broadsheet entirely.
+        $grades = DB::run('DELETE g FROM grades g JOIN students s ON s.id = g.student_id
+                           WHERE s.class_id = ? AND g.subject_id = ?', [$classId, $subjectId]);
+        DB::run('DELETE FROM class_subjects WHERE class_id=? AND subject_id=?', [$classId, $subjectId]);
+        respond(['unmapped' => true, 'grades_deleted' => $grades]);
+
+    } elseif ($path === '/api/v1/terms' && $method === 'GET') {
+        respond(DB::query(
+            'SELECT t.*, ay.name AS year_name
+             FROM terms t
+             JOIN academic_years ay ON ay.id = t.academic_year_id
+             WHERE ay.school_id = 1
+             ORDER BY t.id',
+            []
+        ));
+
+    // ── Academic sessions (years) + terms ──────────────────────────────────────
+    } elseif ($path === '/api/v1/academic-years' && !$id && $method === 'GET') {
+        AcademicController::listYears(authGuard());
+
+    } elseif ($path === '/api/v1/academic-years' && $method === 'POST') {
+        AcademicController::createYear(authGuard());
+
+    } elseif ($path === '/api/v1/academic-years' && $id && $method === 'PUT') {
+        AcademicController::setCurrentYear(authGuard(), $id);
+
+    // ── 404 ───────────────────────────────────────────────────────────────────
+    } else {
+        respond(null, 404, "Endpoint not found: $method $path");
+    }
+
+} catch (Throwable $e) {
+    respond(
+        ['error' => $e->getMessage(), 'file' => basename($e->getFile()), 'line' => $e->getLine()],
+        500,
+        'Server error'
+    );
+}
