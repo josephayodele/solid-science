@@ -1541,6 +1541,128 @@ class FeeController {
             'total_payroll'    => (float)(DB::one('SELECT COALESCE(SUM(net_pay),0) t FROM payroll p JOIN staff s ON s.id=p.staff_id JOIN users u ON u.id=s.user_id WHERE u.school_id=? AND p.month=MONTH(NOW()) AND p.year=YEAR(NOW())',[$sid])['t']??0),
         ]);
     }
+
+    // Only an admin or an accountant may set up fees or bill students.
+    private static function assertCanManage(array $user): void {
+        if (!Perm::isAdmin($user) && ($user['role'] ?? '') !== 'accountant')
+            respond(null, 403, 'Only an administrator or accountant can manage fees.');
+    }
+
+    private const FEE_TYPES = ['tuition','hostel','transport','exam','uniform','other'];
+
+    // ── Fee structures (reusable fee items per term, optionally per class) ───────
+    public static function structures(array $user): void {
+        $sid = (int)$user['school_id'];
+        respond(DB::query(
+            'SELECT fs.id, fs.term_id, fs.class_id, fs.name, fs.amount, fs.fee_type,
+                    c.name AS class_name, t.name AS term_name
+             FROM fee_structures fs
+             LEFT JOIN classes c ON c.id=fs.class_id
+             LEFT JOIN terms t   ON t.id=fs.term_id
+             WHERE fs.school_id=?
+             ORDER BY fs.term_id DESC, (fs.class_id IS NULL) DESC, c.name, fs.name', [$sid]));
+    }
+
+    public static function createStructure(array $user): void {
+        self::assertCanManage($user);
+        $b = body(); $sid = (int)$user['school_id'];
+        $name    = trim((string)($b['name'] ?? ''));
+        $amount  = (float)($b['amount'] ?? 0);
+        $termId  = (int)($b['term_id'] ?? 0);
+        $classId = (isset($b['class_id']) && $b['class_id'] !== '' && $b['class_id'] !== null) ? (int)$b['class_id'] : null;
+        $feeType = in_array($b['fee_type'] ?? '', self::FEE_TYPES, true) ? $b['fee_type'] : 'tuition';
+        if ($name === '')   respond(null, 422, 'Fee name is required.');
+        if ($amount <= 0)   respond(null, 422, 'Enter a valid amount.');
+        if (!$termId)       respond(null, 422, 'Select a term.');
+        if (!DB::one('SELECT t.id FROM terms t JOIN academic_years ay ON ay.id=t.academic_year_id WHERE t.id=? AND ay.school_id=?', [$termId, $sid]))
+            respond(null, 422, 'Invalid term.');
+        if ($classId !== null && !DB::one('SELECT id FROM classes WHERE id=? AND school_id=? AND deleted_at IS NULL', [$classId, $sid]))
+            respond(null, 422, 'Invalid class.');
+        $id = DB::exec('INSERT INTO fee_structures (school_id,term_id,class_id,name,amount,fee_type) VALUES (?,?,?,?,?,?)',
+            [$sid, $termId, $classId, mb_substr($name, 0, 100), $amount, $feeType]);
+        respond(['id' => $id], 201, 'Fee item added');
+    }
+
+    public static function updateStructure(array $user, int $id): void {
+        self::assertCanManage($user);
+        $b = body(); $sid = (int)$user['school_id'];
+        if (!DB::one('SELECT id FROM fee_structures WHERE id=? AND school_id=?', [$id, $sid]))
+            respond(null, 404, 'Fee item not found.');
+        $name    = trim((string)($b['name'] ?? ''));
+        $amount  = (float)($b['amount'] ?? 0);
+        $classId = (isset($b['class_id']) && $b['class_id'] !== '' && $b['class_id'] !== null) ? (int)$b['class_id'] : null;
+        $feeType = in_array($b['fee_type'] ?? '', self::FEE_TYPES, true) ? $b['fee_type'] : 'tuition';
+        if ($name === '') respond(null, 422, 'Fee name is required.');
+        if ($amount <= 0) respond(null, 422, 'Enter a valid amount.');
+        if ($classId !== null && !DB::one('SELECT id FROM classes WHERE id=? AND school_id=? AND deleted_at IS NULL', [$classId, $sid]))
+            respond(null, 422, 'Invalid class.');
+        DB::run('UPDATE fee_structures SET name=?, amount=?, class_id=?, fee_type=? WHERE id=? AND school_id=?',
+            [mb_substr($name, 0, 100), $amount, $classId, $feeType, $id, $sid]);
+        respond(['updated' => true]);
+    }
+
+    public static function deleteStructure(array $user, int $id): void {
+        self::assertCanManage($user);
+        $sid = (int)$user['school_id'];
+        if (!DB::one('SELECT id FROM fee_structures WHERE id=? AND school_id=?', [$id, $sid]))
+            respond(null, 404, 'Fee item not found.');
+        DB::run('DELETE FROM fee_structures WHERE id=? AND school_id=?', [$id, $sid]);
+        respond(['deleted' => true]);
+    }
+
+    // ── Generate invoices ────────────────────────────────────────────────────────
+    // Bill a class, all classes, or one student for a term. Each student's amount is
+    // the sum of the term's fee items that apply to their class (class-specific +
+    // all-class items), unless a flat `amount` override is given. Students who
+    // already have an invoice for that term are skipped (never double-billed).
+    public static function generate(array $user): void {
+        self::assertCanManage($user);
+        $b = body(); $sid = (int)$user['school_id'];
+        $termId   = (int)($b['term_id'] ?? 0);
+        $scope    = in_array($b['scope'] ?? 'class', ['class','all','student'], true) ? $b['scope'] : 'class';
+        $override = (array_key_exists('amount', $b) && $b['amount'] !== '' && $b['amount'] !== null) ? (float)$b['amount'] : null;
+        $dueDate  = !empty($b['due_date']) ? $b['due_date'] : null;
+        if (!$termId) respond(null, 422, 'Select a term.');
+        if ($override !== null && $override < 0) respond(null, 422, 'Amount cannot be negative.');
+
+        if ($scope === 'student') {
+            $studentId = (int)($b['student_id'] ?? 0);
+            if (!$studentId) respond(null, 422, 'Select a student.');
+            $students = DB::query('SELECT s.id, s.class_id FROM students s JOIN users u ON u.id=s.user_id WHERE s.id=? AND u.school_id=? AND s.deleted_at IS NULL', [$studentId, $sid]);
+        } elseif ($scope === 'all') {
+            $students = DB::query('SELECT s.id, s.class_id FROM students s JOIN users u ON u.id=s.user_id WHERE u.school_id=? AND s.deleted_at IS NULL', [$sid]);
+        } else {
+            $classId = (int)($b['class_id'] ?? 0);
+            if (!$classId) respond(null, 422, 'Select a class.');
+            $students = DB::query('SELECT s.id, s.class_id FROM students s JOIN users u ON u.id=s.user_id WHERE s.class_id=? AND u.school_id=? AND s.deleted_at IS NULL', [$classId, $sid]);
+        }
+        if (!$students) respond(null, 422, 'No students found for the selected scope.');
+
+        // Per-class fee totals for this term (class-specific items + all-class items).
+        $byClass = []; $allSum = 0.0;
+        if ($override === null) {
+            foreach (DB::query('SELECT class_id, amount FROM fee_structures WHERE school_id=? AND term_id=?', [$sid, $termId]) as $f) {
+                if ($f['class_id'] === null) $allSum += (float)$f['amount'];
+                else { $cid = (int)$f['class_id']; $byClass[$cid] = ($byClass[$cid] ?? 0) + (float)$f['amount']; }
+            }
+        }
+
+        $created = 0; $skipped = 0; $noFee = 0;
+        DB::conn()->beginTransaction();
+        try {
+            foreach ($students as $st) {
+                $stId = (int)$st['id']; $cid = (int)$st['class_id'];
+                if (DB::one('SELECT id FROM invoices WHERE student_id=? AND term_id=?', [$stId, $termId])) { $skipped++; continue; }
+                $total = $override !== null ? $override : (($byClass[$cid] ?? 0) + $allSum);
+                if ($total <= 0) { $noFee++; continue; }
+                DB::exec('INSERT INTO invoices (invoice_no,student_id,term_id,total_amount,amount_paid,status,due_date) VALUES (?,?,?,?,0,"unpaid",?)',
+                    ['INV-'.$sid.'-'.$termId.'-'.$stId, $stId, $termId, $total, $dueDate]);
+                $created++;
+            }
+            DB::conn()->commit();
+        } catch (\Throwable $e) { DB::conn()->rollBack(); throw $e; }
+        respond(['created' => $created, 'skipped' => $skipped, 'no_fee' => $noFee, 'total' => count($students)], 201, 'Invoices generated');
+    }
 }
 
 // ─── TimetableController ──────────────────────────────────────────────────────

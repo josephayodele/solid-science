@@ -254,6 +254,21 @@ try {
     } elseif ($path === '/api/v1/fees/summary' && $method === 'GET') {
         FeeController::summary(authGuard());
 
+    } elseif ($path === '/api/v1/fees/structures' && !$id && $method === 'GET') {
+        FeeController::structures(authGuard());
+
+    } elseif ($path === '/api/v1/fees/structures' && !$id && $method === 'POST') {
+        FeeController::createStructure(authGuard());
+
+    } elseif ($path === '/api/v1/fees/structures' && $id && $method === 'PUT') {
+        FeeController::updateStructure(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/fees/structures' && $id && $method === 'DELETE') {
+        FeeController::deleteStructure(authGuard(), $id);
+
+    } elseif ($path === '/api/v1/fees/generate' && $method === 'POST') {
+        FeeController::generate(authGuard());
+
     // ── Timetable ─────────────────────────────────────────────────────────────
     } elseif ($path === '/api/v1/timetable' && $method === 'GET') {
         TimetableController::index(authGuard());

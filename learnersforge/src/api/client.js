@@ -127,6 +127,12 @@ export const getPayroll       = (month, year) =>
   api.get('/fees/payroll', { params: { month, year } });
 export const getFeeSummary    = (term_id = 2) =>
   api.get('/fees/summary', { params: { term_id } });
+// Fee structures (reusable fee items) + invoice generation.
+export const getFeeStructures   = () => api.get('/fees/structures');
+export const createFeeStructure = data => api.post('/fees/structures', data);
+export const updateFeeStructure = (id, data) => api.put(`/fees/structures/${id}`, data);
+export const deleteFeeStructure = id => api.delete(`/fees/structures/${id}`);
+export const generateInvoices   = data => api.post('/fees/generate', data);
 
 // ── Timetable ─────────────────────────────────────────────────────────────────
 export const getTimetable  = (class_id, term_id = 2) =>

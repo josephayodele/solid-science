@@ -20,6 +20,7 @@ import { getStudents, getDashboard, getReportCard, emailReportCards, getBroadshe
          getAssignments, createAssignment, updateAssignment, deleteAssignment, getAssignmentSubmissions, gradeAssignment, getMyOnlineAssignments, submitMyAssignment,
          getAudiences, getCommunications, sendCommunication, getEvents, saveEvent as apiSaveEvent, updateEvent, deleteEvent as apiDeleteEvent, sendEventReminder, getParentPreview,
          getInvoices, recordPayment, getExpenses, addExpense, getPayroll as apiGetPayroll, getFeeSummary,
+         getFeeStructures, createFeeStructure, updateFeeStructure, deleteFeeStructure, generateInvoices,
          getInventory, createItem, issueItem as apiIssueItem, restockItem as apiRestockItem,
          getHostels, getRooms, allocateRoom, getVisitors, logVisitor, createHostel, createRoom,
          getBooks, getLoans, createBook, issueBook, returnBook as apiReturnBook,
@@ -4367,14 +4368,19 @@ const Fees = () => {
   const [loading, setLoading]   = useState(true);
   const [payFor, setPayFor]     = useState(null);   // invoice row being paid
   const [expOpen, setExpOpen]   = useState(false);
+  const [structures, setStructures] = useState([]);
+  const [classes, setClasses]   = useState([]);
+  const [setupItem, setSetupItem] = useState(null); // {} = new, {..} = edit, null = closed
+  const [genOpen, setGenOpen]   = useState(false);
   const [toast, setToast]       = useState("");
   const flash = m => { setToast(m); setTimeout(() => setToast(""), 3000); };
   const now = new Date();
 
-  const loadSummary  = t => getFeeSummary(t).then(r => setSummary(r?.data || null)).catch(() => setSummary(null));
-  const loadInvoices = () => getInvoices().then(r => setInvoices(arrOf(r))).catch(() => setInvoices([]));
-  const loadExpenses = () => getExpenses().then(r => setExpenses(arrOf(r))).catch(() => setExpenses([]));
-  const loadPayroll  = () => apiGetPayroll(now.getMonth() + 1, now.getFullYear()).then(r => setPayroll(arrOf(r))).catch(() => setPayroll([]));
+  const loadSummary    = t => getFeeSummary(t).then(r => setSummary(r?.data || null)).catch(() => setSummary(null));
+  const loadInvoices   = () => getInvoices().then(r => setInvoices(arrOf(r))).catch(() => setInvoices([]));
+  const loadExpenses   = () => getExpenses().then(r => setExpenses(arrOf(r))).catch(() => setExpenses([]));
+  const loadPayroll    = () => apiGetPayroll(now.getMonth() + 1, now.getFullYear()).then(r => setPayroll(arrOf(r))).catch(() => setPayroll([]));
+  const loadStructures = () => getFeeStructures().then(r => setStructures(arrOf(r))).catch(() => setStructures([]));
 
   useEffect(() => {
     let dead = false;
@@ -4386,7 +4392,8 @@ const Fees = () => {
         setTerms(ts);
         const tid = (ts.find(t => t.is_current) || ts[0])?.id ?? 2;
         setTermId(tid);
-        await Promise.all([loadSummary(tid), loadInvoices(), loadExpenses(), loadPayroll()]);
+        getClasses().then(r => { if (!dead) setClasses(arrOf(r)); }).catch(() => {});
+        await Promise.all([loadSummary(tid), loadInvoices(), loadExpenses(), loadPayroll(), loadStructures()]);
       } finally { if (!dead) setLoading(false); }
     })();
     return () => { dead = true; };
@@ -4407,7 +4414,7 @@ const Fees = () => {
   return (
     <div className="fi">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-        <Tabs tabs={[{id:"overview",label:"📊 Overview"},{id:"fees",label:"💳 Fee Collection"},{id:"expenses",label:"💸 Expenses"},{id:"payroll",label:"👥 Payroll"},{id:"pl",label:"📈 P&L"}]} active={tab} onChange={setTab}/>
+        <Tabs tabs={[{id:"overview",label:"📊 Overview"},{id:"fees",label:"💳 Fee Collection"},{id:"setup",label:"🧾 Fee Setup"},{id:"expenses",label:"💸 Expenses"},{id:"payroll",label:"👥 Payroll"},{id:"pl",label:"📈 P&L"}]} active={tab} onChange={setTab}/>
         {terms.length > 0 && (tab==="overview"||tab==="pl") && (
           <Sel value={termId?String(termId):""} onChange={v=>setTermId(Number(v))}
                options={terms.map(t=>({value:String(t.id),label:t.name+(t.is_current?" (current)":"")}))} style={{width:190}}/>
@@ -4450,27 +4457,64 @@ const Fees = () => {
         )}
 
         {tab==="fees" && (
-          invoices.length===0 ? empty("💳","No invoices yet. Generate invoices from the enrollment / academic setup to collect fees here.") : (
-          <Card style={{padding:0,overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",minWidth:700}}>
-              <thead><tr style={{background:"#F8FAFC"}}>{["Student","Class","Term","Total","Paid","Balance","Status",""].map((h,i)=><th key={i} style={th}>{h}</th>)}</tr></thead>
-              <tbody>
-                {invoices.map(iv=>(
-                  <tr key={iv.id} style={{borderBottom:`1px solid ${C.border}`}}>
-                    <td style={{padding:"10px 14px",fontSize:12,fontWeight:600}}>{fullName(iv)}</td>
-                    <td style={{padding:"10px 14px",fontSize:12}}>{iv.class_name}</td>
-                    <td style={{padding:"10px 14px",fontSize:12,color:C.textMid}}>{iv.term_name}</td>
-                    <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace"}}>{fmtNaira(iv.total_amount)}</td>
-                    <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace",color:C.accentDark}}>{fmtNaira(iv.amount_paid)}</td>
-                    <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace",color:Number(iv.balance)>0?C.coral:C.textMuted}}>{fmtNaira(iv.balance)}</td>
-                    <td style={{padding:"10px 14px"}}><Badge color={iv.status==="paid"?"green":iv.status==="partial"?"amber":"red"} size="sm">{iv.status}</Badge></td>
-                    <td style={{padding:"10px 14px"}}>{iv.status!=="paid" && <Btn size="sm" variant="secondary" onClick={()=>setPayFor(iv)}>Record</Btn>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
-          )
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:13}}>
+              <div style={{fontSize:12,color:C.textMid}}>{invoices.length} invoice{invoices.length===1?"":"s"}</div>
+              <Btn variant="primary" size="sm" onClick={()=>setGenOpen(true)}>🧾 Generate Invoices</Btn>
+            </div>
+            {invoices.length===0 ? empty("💳","No invoices yet. Set up fee items under “Fee Setup”, then use “Generate Invoices” to bill a class or a student.") : (
+            <Card style={{padding:0,overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",minWidth:700}}>
+                <thead><tr style={{background:"#F8FAFC"}}>{["Student","Class","Term","Total","Paid","Balance","Status",""].map((h,i)=><th key={i} style={th}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {invoices.map(iv=>(
+                    <tr key={iv.id} style={{borderBottom:`1px solid ${C.border}`}}>
+                      <td style={{padding:"10px 14px",fontSize:12,fontWeight:600}}>{fullName(iv)}</td>
+                      <td style={{padding:"10px 14px",fontSize:12}}>{iv.class_name}</td>
+                      <td style={{padding:"10px 14px",fontSize:12,color:C.textMid}}>{iv.term_name}</td>
+                      <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace"}}>{fmtNaira(iv.total_amount)}</td>
+                      <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace",color:C.accentDark}}>{fmtNaira(iv.amount_paid)}</td>
+                      <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace",color:Number(iv.balance)>0?C.coral:C.textMuted}}>{fmtNaira(iv.balance)}</td>
+                      <td style={{padding:"10px 14px"}}><Badge color={iv.status==="paid"?"green":iv.status==="partial"?"amber":"red"} size="sm">{iv.status}</Badge></td>
+                      <td style={{padding:"10px 14px"}}>{iv.status!=="paid" && <Btn size="sm" variant="secondary" onClick={()=>setPayFor(iv)}>Record</Btn>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+            )}
+          </div>
+        )}
+
+        {tab==="setup" && (
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:13}}>
+              <div style={{fontSize:12,color:C.textMid}}>Define the fees charged each term. Leave the class blank to charge every class. “Generate Invoices” sums the items that apply to each student’s class.</div>
+              <Btn variant="primary" size="sm" onClick={()=>setSetupItem({})}>+ Add Fee Item</Btn>
+            </div>
+            {structures.length===0 ? empty("🧾","No fee items yet. Add one (e.g. “Tuition”, “Exam Fee”) to start billing.") : (
+            <Card style={{padding:0,overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",minWidth:620}}>
+                <thead><tr style={{background:"#F8FAFC"}}>{["Fee Item","Type","Term","Applies to","Amount",""].map((h,i)=><th key={i} style={th}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {structures.map(fsr=>(
+                    <tr key={fsr.id} style={{borderBottom:`1px solid ${C.border}`}}>
+                      <td style={{padding:"10px 14px",fontSize:13,fontWeight:600}}>{fsr.name}</td>
+                      <td style={{padding:"10px 14px"}}><Badge color="gray" size="sm">{fsr.fee_type}</Badge></td>
+                      <td style={{padding:"10px 14px",fontSize:12,color:C.textMid}}>{fsr.term_name||`Term ${fsr.term_id}`}</td>
+                      <td style={{padding:"10px 14px",fontSize:12}}>{fsr.class_name||"All classes"}</td>
+                      <td style={{padding:"10px 14px",fontSize:12,fontFamily:"monospace",fontWeight:700}}>{fmtNaira(fsr.amount)}</td>
+                      <td style={{padding:"10px 14px",whiteSpace:"nowrap"}}>
+                        <Btn size="sm" variant="ghost" onClick={()=>setSetupItem(fsr)}>Edit</Btn>
+                        <Btn size="sm" variant="ghost" onClick={async()=>{ if(!window.confirm(`Delete “${fsr.name}”?`))return; try{ await deleteFeeStructure(fsr.id); flash("Fee item deleted."); loadStructures(); }catch(e){ flash(e?.message||e?.data?.message||"Could not delete."); } }}>Delete</Btn>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+            )}
+          </div>
         )}
 
         {tab==="expenses" && (
@@ -4553,6 +4597,8 @@ const Fees = () => {
 
       {payFor && <RecordPaymentModal invoice={payFor} onClose={()=>setPayFor(null)} onDone={()=>{setPayFor(null); loadInvoices(); loadSummary(termId);}} flash={flash}/>}
       {expOpen && <AddExpenseModal cats={EXP_CATS} onClose={()=>setExpOpen(false)} onDone={()=>{setExpOpen(false); loadExpenses(); loadSummary(termId);}} flash={flash}/>}
+      {setupItem && <FeeItemModal item={setupItem} terms={terms} classes={classes} defaultTermId={termId} onClose={()=>setSetupItem(null)} onDone={()=>{setSetupItem(null); loadStructures();}} flash={flash}/>}
+      {genOpen && <GenerateInvoicesModal terms={terms} classes={classes} defaultTermId={termId} onClose={()=>setGenOpen(false)} onDone={()=>{setGenOpen(false); loadInvoices(); loadSummary(termId);}} flash={flash}/>}
       {toast && <div style={{position:"fixed",bottom:26,right:26,zIndex:2000,background:C.navy,color:"#fff",padding:"11px 18px",borderRadius:11,fontSize:12,fontWeight:600}}>{toast}</div>}
     </div>
   );
@@ -4608,6 +4654,113 @@ const AddExpenseModal = ({ cats, onClose, onDone, flash }) => {
         </div>
         <div style={{display:"flex",justifyContent:"flex-end",gap:9,marginTop:4}}><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?"Saving…":"Add Expense"}</Btn></div>
       </div>
+    </Modal>
+  );
+};
+
+// Create / edit a reusable fee item (fee_structures). class blank = all classes.
+const FEE_TYPE_OPTS = ["tuition","exam","hostel","transport","uniform","other"];
+const FeeItemModal = ({ item, terms, classes, defaultTermId, onClose, onDone, flash }) => {
+  const isEdit = !!(item && item.id);
+  const [f, setF] = useState({
+    name:     item?.name || "",
+    fee_type: item?.fee_type || "tuition",
+    term_id:  String(item?.term_id || defaultTermId || (terms[0]?.id ?? "")),
+    class_id: item?.class_id ? String(item.class_id) : "",
+    amount:   item?.amount != null ? String(item.amount) : "",
+  });
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    if (!f.name.trim())      return flash("Fee name is required.");
+    if (!parseFloat(f.amount)) return flash("Enter a valid amount.");
+    if (!f.term_id)          return flash("Select a term.");
+    setSaving(true);
+    const payload = { name:f.name.trim(), fee_type:f.fee_type, term_id:Number(f.term_id), class_id:f.class_id?Number(f.class_id):null, amount:parseFloat(f.amount) };
+    try { if (isEdit) await updateFeeStructure(item.id, payload); else await createFeeStructure(payload); flash(isEdit?"Fee item updated.":"Fee item added."); onDone(); }
+    catch (e) { flash(e?.message||e?.data?.message||"Could not save fee item."); setSaving(false); }
+  };
+  return (
+    <Modal title={isEdit?"Edit Fee Item":"Add Fee Item"} onClose={onClose} width={460}>
+      <div style={{display:"flex",flexDirection:"column",gap:11}}>
+        <Input label="Fee name" value={f.name} onChange={v=>setF(s=>({...s,name:v}))} placeholder="e.g. Tuition Fee"/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11}}>
+          <Sel label="Type" value={f.fee_type} onChange={v=>setF(s=>({...s,fee_type:v}))} options={FEE_TYPE_OPTS.map(t=>({value:t,label:t.charAt(0).toUpperCase()+t.slice(1)}))}/>
+          <Input label="Amount (₦)" type="number" value={f.amount} onChange={v=>setF(s=>({...s,amount:v}))}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11}}>
+          <Sel label="Term" value={f.term_id} onChange={v=>setF(s=>({...s,term_id:v}))} options={terms.map(t=>({value:String(t.id),label:t.name+(t.is_current?" (current)":"")}))}/>
+          <Sel label="Applies to" value={f.class_id} onChange={v=>setF(s=>({...s,class_id:v}))} options={[{value:"",label:"All classes"},...classes.map(c=>({value:String(c.id),label:c.name}))]}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"flex-end",gap:9,marginTop:4}}><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?"Saving…":(isEdit?"Save":"Add")}</Btn></div>
+      </div>
+    </Modal>
+  );
+};
+
+// Generate invoices for a class, all classes, or one student. Amount defaults to
+// the sum of each student's applicable fee items unless an override is given.
+const GenerateInvoicesModal = ({ terms, classes, defaultTermId, onClose, onDone, flash }) => {
+  const [termId, setTermId]   = useState(String(defaultTermId || terms.find(t=>t.is_current)?.id || terms[0]?.id || ""));
+  const [scope, setScope]     = useState("class");
+  const [classId, setClassId] = useState(classes[0] ? String(classes[0].id) : "");
+  const [studentId, setStudentId] = useState("");
+  const [students, setStudents]   = useState([]);
+  const [amount, setAmount]   = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [saving, setSaving]   = useState(false);
+  const [result, setResult]   = useState(null);
+
+  // Load the class's students when billing a single student.
+  useEffect(() => {
+    if (scope!=="student" || !classId) { setStudents([]); return; }
+    let live=true;
+    getStudents({ class_id:Number(classId), per_page:200 })
+      .then(r => { if(live){ const l=arrOf(r,"students").map(normStudent); setStudents(l); setStudentId(l[0]?String(l[0].id):""); } })
+      .catch(() => { if(live) setStudents([]); });
+    return () => { live=false; };
+  }, [scope, classId]);
+
+  const generate = async () => {
+    if (!termId) return flash("Select a term.");
+    if (scope==="class"   && !classId)   return flash("Select a class.");
+    if (scope==="student" && !studentId) return flash("Select a student.");
+    setSaving(true);
+    const payload = { term_id:Number(termId), scope,
+      ...(scope==="class"   ? { class_id:Number(classId) } : {}),
+      ...(scope==="student" ? { student_id:Number(studentId) } : {}),
+      ...(amount!=="" ? { amount:parseFloat(amount) } : {}),
+      ...(dueDate ? { due_date:dueDate } : {}) };
+    try { const res = await generateInvoices(payload); setResult(res?.data ?? res); }
+    catch (e) { flash(e?.message||e?.data?.message||"Could not generate invoices."); setSaving(false); }
+  };
+
+  return (
+    <Modal title="🧾 Generate Invoices" onClose={onClose} width={460}>
+      {result ? (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <div style={{padding:"13px 15px",borderRadius:10,background:C.accentLight,fontSize:13,color:C.accentDark,fontWeight:600}}>
+            ✅ Created <strong>{result.created}</strong> invoice{result.created===1?"":"s"}.
+            {result.skipped>0 && <> {result.skipped} already invoiced (skipped).</>}
+            {result.no_fee>0 && <> {result.no_fee} had no fee set.</>}
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end"}}><Btn variant="primary" onClick={onDone}>Done</Btn></div>
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:11}}>
+          <Sel label="Term" value={termId} onChange={setTermId} options={terms.map(t=>({value:String(t.id),label:t.name+(t.is_current?" (current)":"")}))}/>
+          <Sel label="Bill" value={scope} onChange={setScope} options={[{value:"class",label:"A class"},{value:"all",label:"All classes"},{value:"student",label:"One student"}]}/>
+          {scope!=="all" && (
+            <Sel label="Class" value={classId} onChange={setClassId} options={classes.length?classes.map(c=>({value:String(c.id),label:c.name})):[{value:"",label:"No classes"}]}/>
+          )}
+          {scope==="student" && (
+            <Sel label="Student" value={studentId} onChange={setStudentId} options={students.length?students.map(s=>({value:String(s.id),label:s.name||s.student_id||s.id})):[{value:"",label:"— no students —"}]}/>
+          )}
+          <Input label="Amount per student (₦) — optional" type="number" value={amount} onChange={setAmount} placeholder="Blank = sum of fee items for the class"/>
+          <Input label="Due date — optional" type="date" value={dueDate} onChange={setDueDate}/>
+          <div style={{fontSize:11,color:C.textMuted}}>Students already invoiced for this term are skipped automatically.</div>
+          <div style={{display:"flex",justifyContent:"flex-end",gap:9,marginTop:4}}><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={generate} disabled={saving}>{saving?"Generating…":"Generate"}</Btn></div>
+        </div>
+      )}
     </Modal>
   );
 };
